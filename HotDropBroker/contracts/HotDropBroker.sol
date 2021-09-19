@@ -4,27 +4,33 @@ pragma solidity ^0.8.0;
 import "hardhat/console.sol";
 
 interface IHotDropFactory {
-	function tokenIdToProjectId(uint256 _tokenId) external view returns (uint256 projectId);
-	function safeTransferFrom(address from, address to, uint256 tokenId) external;
+	function projectIdToTokenAddress(uint256 _projectId) external view returns (address tokenAddress);
+}
+
+interface IERC721 {
+	function safeTransferFrom(address _from, address _to, uint256 _tokenId) external payable;
 }
 
 contract HotDropBroker {
     IHotDropFactory public HOTDROP_FACTORY;
     
-    event HotDropAction(address indexed _user, uint256 indexed _hotDropProjectId, uint256 _priceInWei, uint256 _quantity, string _action);
-    
+    event PlaceOrder(address indexed _user, uint256 indexed _hotDropProjectId, uint256 _priceInWeiEach, uint256 _quantity);
+    event FulfillOrder(address indexed _bot, address indexed _user, uint256 indexed _hotDropProjectId, uint256 _priceInWeiEach, uint256 _quantity, uint256 _brokerFee, uint256 _botFee);
+
     struct Order {
         uint256 quantity;
-        uint256 priceInWei;
+        uint256 priceInWeiEach;
     }
 
     address public hotDropBroker;
     address public hotDropFactory;
     address public hotDropsProfitReceiver;
-
     uint128 public hotDropBrokerFeeRate;
     
-    mapping(address => mapping(uint256 => Order)) public orders;
+    // project_id => user => order
+    mapping(uint256 => mapping(address => Order)) public orders;
+
+    // user => balance
     mapping(address => uint256) public balances;
 
     constructor(address _hotDropFactory, address _profitReceiver, uint128 _feeRate) {
@@ -40,44 +46,42 @@ contract HotDropBroker {
     function placeOrder(uint256 _hotDropProjectId, uint128 quantity) external payable {
 		require(msg.value > 0, 'Zero wei offers not accepted.');
         require(quantity == 1, 'we currently dont support more than one nft at a time');
-        Order memory order = orders[msg.sender][_hotDropProjectId];
-		require(order.priceInWei * order.quantity == 0, 'You already placed an order');           
-        orders[msg.sender][_hotDropProjectId].priceInWei = msg.value;
-        orders[msg.sender][_hotDropProjectId].quantity = quantity;
+        Order memory order = orders[_hotDropProjectId][msg.sender];
+		require(order.priceInWeiEach * order.quantity == 0, 'You already placed an order');           
+        orders[_hotDropProjectId][msg.sender].priceInWeiEach = msg.value;
+        orders[_hotDropProjectId][msg.sender].quantity = quantity;
 
-        emit HotDropAction(msg.sender, _hotDropProjectId, msg.value, quantity, 'Placed Order');
+        emit PlaceOrder(msg.sender, _hotDropProjectId, msg.value, quantity);
     }
 
     // BOT FUNCTIONS
-    function fulfillOrder(address _user, uint256 _hotDropProjectId, uint256 _tokenId, uint256 _expectedPriceInWei, address _profitTo, bool _sendNow) public returns (uint256) {
-		Order memory order = orders[_user][_hotDropProjectId];
+    function fulfillOrder(address _user, uint256 _hotDropProjectId, uint256 _tokenId, uint256 _expectedpriceInWeiEach, address _profitTo) public returns (uint256) {
+		Order memory order = orders[_hotDropProjectId][_user];
         require(order.quantity > 0, 'user order does not exist');
         // protect the bot from user front running
-        require(order.priceInWei >= _expectedPriceInWei, 'user offer insufficient');
-        require(order.quantity == 1, 'we currently dont support more than one nft at a time');
-
-        uint256 hotDropBrokerFee = order.priceInWei * hotDropBrokerFeeRate / 100;
+        require(order.priceInWeiEach >= _expectedpriceInWeiEach, 'user offer insufficient');
+		
+        orders[_hotDropProjectId][_user].quantity = order.quantity - 1; // reverts on underflow
+        uint256 hotDropBrokerFee = order.priceInWeiEach * hotDropBrokerFeeRate / 100;
+        
         // pay the hot drop broker
 		balances[hotDropsProfitReceiver] += hotDropBrokerFee;
 
-		// transfer NFT to user
-		HOTDROP_FACTORY.safeTransferFrom(msg.sender, _user, _tokenId); // reverts on failure
+		// send NFT to the user
+        IERC721 nftContract = IERC721(HOTDROP_FACTORY.projectIdToTokenAddress(_hotDropProjectId));
+        nftContract.safeTransferFrom(msg.sender, _user, _tokenId);
 
         // pay the bot
-		sendValue(payable(_profitTo), order.priceInWei - hotDropBrokerFeeRate);    
+        uint256 botPayment = order.priceInWeiEach - hotDropBrokerFeeRate;
+		sendValue(payable(_profitTo), botPayment);   
+        emit FulfillOrder(msg.sender, _user, _hotDropProjectId, order.priceInWeiEach, 1, hotDropBrokerFee, botPayment); 
+        return botPayment;
     }
 
     // HELPER FUNCTIONS
     function viewOrder(address _user, uint256 _hotDropProjectId) external view returns (Order memory) {
-		return orders[_user][_hotDropProjectId];
+		return orders[_hotDropProjectId][_user];
 	}
-
-    function viewOrders(address[] memory _users, uint256[] memory _hotDropProjectId) external view returns (Order[] memory) {
-		Order[] memory output = new Order[](_users.length);
-		for (uint256 i = 0; i < _users.length; i++) output[i] = orders[_users[i]][_hotDropProjectId[i]];
-		return output;
-	}
-
 
 	// OpenZeppelin's sendValue function, used for transfering ETH out of this contract
 	function sendValue(address payable recipient, uint256 amount) internal {
