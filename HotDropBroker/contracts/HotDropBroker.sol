@@ -50,6 +50,7 @@ contract HotDropBroker {
 		require(order.priceInWeiEach * order.quantity == 0, 'You already placed an order');           
         orders[_hotDropProjectId][msg.sender].priceInWeiEach = msg.value;
         orders[_hotDropProjectId][msg.sender].quantity = quantity;
+        balances[msg.sender] = msg.value;
 
         emit PlaceOrder(msg.sender, _hotDropProjectId, msg.value, quantity);
     }
