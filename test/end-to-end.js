@@ -40,6 +40,7 @@ describe('End To End', function () {
         expect(await hotDropBroker.balances(accounts[0].address)).to.not.be.equal(0);
     });
     it("Fulfills an order", async() => {
+        await fakeNFT.dropNFT(accounts[0].address);
         await fakeNFT.approve(hotDropBroker.address, 1);
         await hotDropBroker.fulfillOrder(accounts[0].address, 1, 1, ethers.utils.parseEther("1.0"), accounts[0].address);
     });
